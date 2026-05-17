@@ -3,11 +3,13 @@
 ![alt text](image.png)
 
 ## 1.序
+
 ### 博览 [AVD_KSU](https://5ec1cff.github.io/my-blog/2024/01/16/avd-ksu/index.html),[AVD_KSU2](https://5ec1cff.github.io/my-blog/2024/01/31/avd-ksu2/index.html)
 
 ```bash
 cat /proc/version
 ```
+
 **Linux version 6.6.30-android15-8-gdd9c02ccfe27-ab11987101**: 其中`-ab`后跟的是内核源码树的提交哈希，`-g` 后跟着的是一个 **12 位 16 进制数**，在[BUILD_INFO](https://ci.android.com/builds/submitted/11987101/kernel_virt_x86_64/latest/view/BUILD_INFO)对应
 
 ```bash
@@ -38,12 +40,16 @@ tools/bazel run --config=fast --config=stamp --lto=none --action_env=KSU_VERSION
 ```
 
 ## 终
+
 ### Windows
-```
+
+```shell
 .\emulator.exe -avd Pixel_9 -kernel D:\VMShare\bzImage -show-kernel -no-snapshot-load
 ```
+
 ### Linux
-```
+
+```shell
 ./emulator -avd Pixel_9 -kernel ~/bzImage -show-kernel -no-snapshot-load
 ```
 

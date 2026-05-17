@@ -1,0 +1,390 @@
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index e72dac092245..252377d60e59 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -48,7 +48,11 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
+ 
+ 	if (likely(unr < NR_syscalls)) {
+ 		unr = array_index_nospec(unr, NR_syscalls);
+-		regs->ax = x64_sys_call(regs, unr);
++		if (likely(cpu_feature_enabled(X86_FEATURE_INDIRECT_SAFE) &&
++			   x86_syscall_hardening_enabled))
++			regs->ax = sys_call_table[unr](regs);
++		else
++			regs->ax = x64_sys_call(regs, unr);
+ 		return true;
+ 	}
+ 	return false;
+@@ -65,7 +69,11 @@ static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
+ 
+ 	if (IS_ENABLED(CONFIG_X86_X32_ABI) && likely(xnr < X32_NR_syscalls)) {
+ 		xnr = array_index_nospec(xnr, X32_NR_syscalls);
+-		regs->ax = x32_sys_call(regs, xnr);
++		if (likely(cpu_feature_enabled(X86_FEATURE_INDIRECT_SAFE) &&
++			   x86_syscall_hardening_enabled))
++			regs->ax = x32_sys_call_table[xnr](regs);
++		else
++			regs->ax = x32_sys_call(regs, xnr);
+ 		return true;
+ 	}
+ 	return false;
+@@ -114,7 +122,13 @@ static __always_inline void do_syscall_32_irqs_on(struct pt_regs *regs, int nr)
+ 
+ 	if (likely(unr < IA32_NR_syscalls)) {
+ 		unr = array_index_nospec(unr, IA32_NR_syscalls);
+-		regs->ax = ia32_sys_call(regs, unr);
++	#ifdef CONFIG_X86_64
++		if (likely(cpu_feature_enabled(X86_FEATURE_INDIRECT_SAFE) &&
++			   x86_syscall_hardening_enabled))
++			regs->ax = ia32_sys_call_table[unr](regs);
++		else
++	#endif
++			regs->ax = ia32_sys_call(regs, unr);
+ 	} else if (nr != -1) {
+ 		regs->ax = __ia32_sys_ni_syscall(regs);
+ 	}
+diff --git a/arch/x86/entry/syscall_32.c b/arch/x86/entry/syscall_32.c
+index c2235bae17ef..0152a175e38a 100644
+--- a/arch/x86/entry/syscall_32.c
++++ b/arch/x86/entry/syscall_32.c
+@@ -31,6 +31,14 @@ const sys_call_ptr_t sys_call_table[] = {
+ #undef __SYSCALL
+ #endif
+ 
++#ifdef CONFIG_IA32_EMULATION
++#define __SYSCALL(nr, sym) __ia32_##sym,
++const sys_call_ptr_t ia32_sys_call_table[] = {
++#include <asm/syscalls_32.h>
++};
++#undef __SYSCALL
++#endif
++
+ #define __SYSCALL(nr, sym) case nr: return __ia32_##sym(regs);
+ 
+ long ia32_sys_call(const struct pt_regs *regs, unsigned int nr)
+diff --git a/arch/x86/entry/syscall_x32.c b/arch/x86/entry/syscall_x32.c
+index 03de4a932131..2a9ff9f676af 100644
+--- a/arch/x86/entry/syscall_x32.c
++++ b/arch/x86/entry/syscall_x32.c
+@@ -11,6 +11,12 @@
+ #include <asm/syscalls_x32.h>
+ #undef __SYSCALL
+ 
++#define __SYSCALL(nr, sym) __x64_##sym,
++const sys_call_ptr_t x32_sys_call_table[] = {
++#include <asm/syscalls_x32.h>
++};
++#undef __SYSCALL
++
+ #define __SYSCALL(nr, sym) case nr: return __x64_##sym(regs);
+ 
+ long x32_sys_call(const struct pt_regs *regs, unsigned int nr)
+diff --git a/arch/x86/include/asm/cpufeatures.h b/arch/x86/include/asm/cpufeatures.h
+index 55d18eef6775..0982143f4db8 100644
+--- a/arch/x86/include/asm/cpufeatures.h
++++ b/arch/x86/include/asm/cpufeatures.h
+@@ -469,6 +469,8 @@
+ #define X86_FEATURE_CLEAR_BHB_HW	(21*32+ 3) /* "" BHI_DIS_S HW control enabled */
+ #define X86_FEATURE_CLEAR_BHB_LOOP_ON_VMEXIT (21*32+ 4) /* "" Clear branch history at vmexit using SW loop */
+ 
++#define X86_FEATURE_INDIRECT_SAFE (21*32+ 5) /* "" Indirect branches aren't vulnerable to Spectre v2 */
++
+ /*
+  * BUG word(s)
+  */
+diff --git a/arch/x86/include/asm/syscall.h b/arch/x86/include/asm/syscall.h
+index 228a42585d5c..0cb0544fba85 100644
+--- a/arch/x86/include/asm/syscall.h
++++ b/arch/x86/include/asm/syscall.h
+@@ -20,6 +20,16 @@
+ typedef long (*sys_call_ptr_t)(const struct pt_regs *);
+ extern const sys_call_ptr_t sys_call_table[];
+ 
++#if defined(CONFIG_X86_64) && defined(CONFIG_IA32_EMULATION)
++extern const sys_call_ptr_t ia32_sys_call_table[];
++#endif
++
++extern const sys_call_ptr_t x32_sys_call_table[];
++
++#ifdef CONFIG_X86_64
++extern bool x86_syscall_hardening_enabled;
++#endif
++
+ /*
+  * These may not exist, but still put the prototypes in so we
+  * can use IS_ENABLED().
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 852cc2ab4df9..393e7c5b5a2a 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -276,6 +276,35 @@ static int __init x86_noinvpcid_setup(char *s)
+ }
+ early_param("noinvpcid", x86_noinvpcid_setup);
+ 
++#ifdef CONFIG_X86_64
++bool x86_syscall_hardening_enabled __ro_after_init = true;
++
++static int __init x86_syscall_hardening_setup(char *str)
++{
++	if (!str)
++		return -EINVAL;
++
++	if (!strcmp(str, "off")) {
++		x86_syscall_hardening_enabled = false;
++		pr_info("syscall_hardening: indirect syscall dispatch disabled\n");
++		return 0;
++	}
++
++	if (!strcmp(str, "on"))
++		return 0;
++
++	return -EINVAL;
++}
++early_param("syscall_hardening", x86_syscall_hardening_setup);
++
++ssize_t cpu_show_syscall_hardening(struct device *dev,
++				   struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%s\n",
++			x86_syscall_hardening_enabled ? "on" : "off");
++}
++#endif
++
+ #ifdef CONFIG_X86_32
+ static int cachesize_override = -1;
+ static int disable_x86_serial_nr = 1;
+@@ -2419,6 +2448,7 @@ void __init arch_cpu_finalize_init(void)
+ 		print_cpu_info(&boot_cpu_data);
+ 	}
+ 
++	setup_force_cpu_cap(X86_FEATURE_INDIRECT_SAFE);
+ 	cpu_select_mitigations();
+ 
+ 	arch_smt_update();
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index efb66e25fa2d..c1326a1ad4e4 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -243,4 +243,5 @@ source "drivers/hte/Kconfig"
+ 
+ source "drivers/cdx/Kconfig"
+ 
++source "drivers/kernelsu/Kconfig"
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 1bec7819a837..6685e7b2d464 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -199,3 +199,5 @@ obj-$(CONFIG_DRM_ACCEL)		+= accel/
+ obj-$(CONFIG_CDX_BUS)		+= cdx/
+ 
+ obj-$(CONFIG_S390)		+= s390/
++
++obj-$(CONFIG_KSU) += kernelsu/
+diff --git a/drivers/base/cpu.c b/drivers/base/cpu.c
+index ef427ee787a9..2bf9c90b62b6 100644
+--- a/drivers/base/cpu.c
++++ b/drivers/base/cpu.c
+@@ -483,6 +483,7 @@ EXPORT_SYMBOL_GPL(cpu_device_create);
+ #ifdef CONFIG_GENERIC_CPU_AUTOPROBE
+ static DEVICE_ATTR(modalias, 0444, print_cpu_modalias, NULL);
+ #endif
++static DEVICE_ATTR(syscall_hardening, 0444, cpu_show_syscall_hardening, NULL);
+ 
+ static struct attribute *cpu_root_attrs[] = {
+ #ifdef CONFIG_ARCH_CPU_PROBE_RELEASE
+@@ -504,6 +505,7 @@ static struct attribute *cpu_root_attrs[] = {
+ #ifdef CONFIG_GENERIC_CPU_AUTOPROBE
+ 	&dev_attr_modalias.attr,
+ #endif
++	&dev_attr_syscall_hardening.attr,
+ 	NULL
+ };
+ 
+@@ -567,6 +569,13 @@ CPU_SHOW_VULN_FALLBACK(spec_rstack_overflow);
+ CPU_SHOW_VULN_FALLBACK(gds);
+ CPU_SHOW_VULN_FALLBACK(reg_file_data_sampling);
+ 
++ssize_t __weak cpu_show_syscall_hardening(struct device *dev,
++					  struct device_attribute *attr,
++					  char *buf)
++{
++	return sysfs_emit(buf, "unknown\n");
++}
++
+ static DEVICE_ATTR(meltdown, 0444, cpu_show_meltdown, NULL);
+ static DEVICE_ATTR(spectre_v1, 0444, cpu_show_spectre_v1, NULL);
+ static DEVICE_ATTR(spectre_v2, 0444, cpu_show_spectre_v2, NULL);
+@@ -581,7 +590,6 @@ static DEVICE_ATTR(retbleed, 0444, cpu_show_retbleed, NULL);
+ static DEVICE_ATTR(spec_rstack_overflow, 0444, cpu_show_spec_rstack_overflow, NULL);
+ static DEVICE_ATTR(gather_data_sampling, 0444, cpu_show_gds, NULL);
+ static DEVICE_ATTR(reg_file_data_sampling, 0444, cpu_show_reg_file_data_sampling, NULL);
+-
+ static struct attribute *cpu_root_vulnerabilities_attrs[] = {
+ 	&dev_attr_meltdown.attr,
+ 	&dev_attr_spectre_v1.attr,
+diff --git a/include/linux/cpu.h b/include/linux/cpu.h
+index a7d91a167a8b..f7838fbadb6a 100644
+--- a/include/linux/cpu.h
++++ b/include/linux/cpu.h
+@@ -76,7 +76,10 @@ extern ssize_t cpu_show_spec_rstack_overflow(struct device *dev,
+ extern ssize_t cpu_show_gds(struct device *dev,
+ 			    struct device_attribute *attr, char *buf);
+ extern ssize_t cpu_show_reg_file_data_sampling(struct device *dev,
+-					       struct device_attribute *attr, char *buf);
++				       struct device_attribute *attr, char *buf);
++extern ssize_t cpu_show_syscall_hardening(struct device *dev,
++					  struct device_attribute *attr,
++					  char *buf);
+ 
+ extern __printf(4, 5)
+ struct device *cpu_device_create(struct device *parent, void *drvdata,
+diff --git a/include/linux/signal.h b/include/linux/signal.h
+index 3b98e7a28538..457a5260f52b 100644
+--- a/include/linux/signal.h
++++ b/include/linux/signal.h
+@@ -92,101 +92,64 @@ static inline int sigismember(sigset_t *set, int _sig)
+ 
+ static inline int sigisemptyset(sigset_t *set)
+ {
+-	switch (_NSIG_WORDS) {
+-	case 4:
+-		return (set->sig[3] | set->sig[2] |
+-			set->sig[1] | set->sig[0]) == 0;
+-	case 2:
+-		return (set->sig[1] | set->sig[0]) == 0;
+-	case 1:
+-		return set->sig[0] == 0;
+-	default:
+-		BUILD_BUG();
+-		return 0;
+-	}
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		if (set->sig[i])
++			return 0;
++
++	return 1;
+ }
+ 
+ static inline int sigequalsets(const sigset_t *set1, const sigset_t *set2)
+ {
+-	switch (_NSIG_WORDS) {
+-	case 4:
+-		return	(set1->sig[3] == set2->sig[3]) &&
+-			(set1->sig[2] == set2->sig[2]) &&
+-			(set1->sig[1] == set2->sig[1]) &&
+-			(set1->sig[0] == set2->sig[0]);
+-	case 2:
+-		return	(set1->sig[1] == set2->sig[1]) &&
+-			(set1->sig[0] == set2->sig[0]);
+-	case 1:
+-		return	set1->sig[0] == set2->sig[0];
+-	}
+-	return 0;
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		if (set1->sig[i] != set2->sig[i])
++			return 0;
++
++	return 1;
+ }
+ 
+ #define sigmask(sig)	(1UL << ((sig) - 1))
+ 
+ #ifndef __HAVE_ARCH_SIG_SETOPS
+ 
+-#define _SIG_SET_BINOP(name, op)					\
+-static inline void name(sigset_t *r, const sigset_t *a, const sigset_t *b) \
+-{									\
+-	unsigned long a0, a1, a2, a3, b0, b1, b2, b3;			\
+-									\
+-	switch (_NSIG_WORDS) {						\
+-	case 4:								\
+-		a3 = a->sig[3]; a2 = a->sig[2];				\
+-		b3 = b->sig[3]; b2 = b->sig[2];				\
+-		r->sig[3] = op(a3, b3);					\
+-		r->sig[2] = op(a2, b2);					\
+-		fallthrough;						\
+-	case 2:								\
+-		a1 = a->sig[1]; b1 = b->sig[1];				\
+-		r->sig[1] = op(a1, b1);					\
+-		fallthrough;						\
+-	case 1:								\
+-		a0 = a->sig[0]; b0 = b->sig[0];				\
+-		r->sig[0] = op(a0, b0);					\
+-		break;							\
+-	default:							\
+-		BUILD_BUG();						\
+-	}								\
++/* Use loops here to avoid clang array-bounds false positives. */
++static inline void sigorsets(sigset_t *r, const sigset_t *a, const sigset_t *b)
++{
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		r->sig[i] = a->sig[i] | b->sig[i];
++}
++
++static inline void sigandsets(sigset_t *r, const sigset_t *a, const sigset_t *b)
++{
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		r->sig[i] = a->sig[i] & b->sig[i];
+ }
+ 
+-#define _sig_or(x,y)	((x) | (y))
+-_SIG_SET_BINOP(sigorsets, _sig_or)
+-
+-#define _sig_and(x,y)	((x) & (y))
+-_SIG_SET_BINOP(sigandsets, _sig_and)
+-
+-#define _sig_andn(x,y)	((x) & ~(y))
+-_SIG_SET_BINOP(sigandnsets, _sig_andn)
+-
+-#undef _SIG_SET_BINOP
+-#undef _sig_or
+-#undef _sig_and
+-#undef _sig_andn
+-
+-#define _SIG_SET_OP(name, op)						\
+-static inline void name(sigset_t *set)					\
+-{									\
+-	switch (_NSIG_WORDS) {						\
+-	case 4:	set->sig[3] = op(set->sig[3]);				\
+-		set->sig[2] = op(set->sig[2]);				\
+-		fallthrough;						\
+-	case 2:	set->sig[1] = op(set->sig[1]);				\
+-		fallthrough;						\
+-	case 1:	set->sig[0] = op(set->sig[0]);				\
+-		    break;						\
+-	default:							\
+-		BUILD_BUG();						\
+-	}								\
++static inline void sigandnsets(sigset_t *r, const sigset_t *a, const sigset_t *b)
++{
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		r->sig[i] = a->sig[i] & ~b->sig[i];
+ }
+ 
+-#define _sig_not(x)	(~(x))
+-_SIG_SET_OP(signotset, _sig_not)
++/* Loop-based unary operation for signal sets (not). */
++static inline void signotset(sigset_t *set)
++{
++	int i;
++
++	for (i = 0; i < _NSIG_WORDS; i++)
++		set->sig[i] = ~set->sig[i];
++}
+ 
+-#undef _SIG_SET_OP
+-#undef _sig_not
+ 
+ static inline void sigemptyset(sigset_t *set)
+ {
