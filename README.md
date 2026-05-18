@@ -25,3 +25,16 @@
 ## 从[Releases](https://github.com/Xieansecn/AndroidAVD_kernel-ranchu/releases)选择你需要的内核（已标注版本）
 
 架构：`x86_64`
+
+### 我们还在做的事
+
+![alt text](img/Image.png)
+
+> *即使残阳既落，也能温暖最后一片云彩*
+
+附我自己的仓库编译：[KernelSU](https://github.com/Xieansecn/KernelSU)
+
+鸣谢:  
+
+- [hmtheboy154](https://github.com/hmtheboy154)
+- [Commit: 40e8fb7](https://github.com/tiann/KernelSU/commit/40e8fb7616bfd875babb45364f5262657538327a)
