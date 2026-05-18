@@ -184,8 +184,8 @@ https://github.com/android-generic/kernel-zenith/commit/f5813e10b7630e1ccd86fc2c
 
 这些补丁会创建`X86_FEATURE_INDIRECT_SAFE`,可以通过`cmdline syscall_hardening=off`激活  
 我们使用kernel 6.6内核的补丁来实现在x86_64架构上使用KernelSU，参考：  
-[android15-6.6_x86_64.patch](android15-6.6_x86_64.patch)  
-[kernelSU](kernelSU.patch)
+[android15-6.6_x86_64.patch](patchs/android15-6.6_x86_64.patch)  
+[kernelSU](/patchs/kernelSU.patch)
 
 使用:
 `git apply android15-6.6_x86_64.patch` 和 `git apply kernelSU.patch` 来进行使用
